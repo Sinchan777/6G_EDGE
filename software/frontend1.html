@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>6G HIVE OPS | COMMAND CENTER</title>
+    
+    <!-- 1. LOAD LIBRARIES -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <style>
+        /* --- 2. THEME VARIABLES --- */
+        :root {
+            /* Dark Mode (Default) */
+            --bg-color: #050505;
+            --text-main: #ffffff;
+            --text-sub: #888888;
+            --glass-bg: rgba(10, 10, 10, 0.9);
+            --border-color: #333;
+            --neon-green: #00ff41;
+            --neon-red: #ff003c;
+            --map-filter: grayscale(100%) contrast(1.2) brightness(0.4);
+        }
+
+        body.light-mode {
+            /* Light Mode Overrides */
+            --bg-color: #e0e5ec;
+            --text-main: #1a1a1a;
+            --text-sub: #555555;
+            --glass-bg: rgba(255, 255, 255, 0.9);
+            --border-color: #ccc;
+            --neon-green: #009933; /* Darker green for visibility */
+            --neon-red: #cc0000;   /* Darker red for visibility */
+            --map-filter: none;    /* Clear map */
+        }
+
+        body { 
+            margin: 0; background: var(--bg-color); color: var(--text-main); 
+            font-family: 'Courier New', monospace; overflow: hidden; 
+            transition: background 0.3s, color 0.3s;
+        }
+
+        /* MAP */
+        #map { position: absolute; inset: 0; z-index: 0; filter: var(--map-filter); transition: filter 0.3s; }
+        
+        /* HUD */
+        .hud { position: absolute; inset: 0; z-index: 10; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; }
+        
+        /* HEADER */
+        .header { 
+            background: var(--glass-bg); border-left: 5px solid var(--neon-green); 
+            padding: 20px; margin: 20px; width: 450px; pointer-events: auto; 
+            display: flex; justify-content: space-between; align-items: center;
+            border: 1px solid var(--border-color);
+        }
+        h1 { margin: 0; font-size: 28px; text-shadow: 0 0 5px var(--neon-green); }
+        
+        .theme-btn {
+            background: transparent; border: 1px solid var(--text-main); 
+            color: var(--text-main); padding: 5px 10px; cursor: pointer; 
+            font-weight: bold; font-family: inherit; transition: 0.2s;
+        }
+        .theme-btn:hover { background: var(--text-main); color: var(--bg-color); }
+
+        #conn-status { font-size: 12px; font-weight: bold; margin-top: 5px; }
+        .live { color: var(--neon-green); }
+        .demo { color: orange; animation: blink 1s infinite; }
+
+        /* SIDEBAR */
+        .sidebar { 
+            position: absolute; top: 20px; right: 20px; width: 300px; 
+            background: var(--glass-bg); border: 1px solid var(--border-color); 
+            padding: 20px; pointer-events: auto; 
+        }
+        .metric { margin-bottom: 15px; border-bottom: 1px solid var(--border-color); padding-bottom: 5px; }
+        .label { font-size: 10px; color: var(--text-sub); letter-spacing: 1px; }
+        .val { font-size: 36px; font-weight: bold; }
+        
+        /* BADGES */
+        .badge { 
+            padding: 10px; text-align: center; font-weight: bold; font-size: 18px; 
+            border: 2px solid var(--neon-green); color: var(--neon-green); margin-bottom: 20px; 
+        }
+        .crit { 
+            border-color: var(--neon-red); color: var(--neon-red); 
+            animation: flash 0.5s infinite alternate; background: rgba(255, 0, 60, 0.1); 
+        }
+        @keyframes flash { from { opacity: 1; } to { opacity: 0.5; } }
+
+        /* CONSOLE */
+        #console { 
+            position: absolute; bottom: 20px; left: 20px; width: 450px; height: 150px; 
+            background: #000; border: 1px solid #444; color: #0f0; font-size: 11px; 
+            overflow: hidden; padding: 10px; opacity: 0.8; pointer-events: auto; 
+        }
+        body.light-mode #console { background: #fff; color: #333; border: 1px solid #ccc; }
+        .err { color: #ff003c; }
+
+        /* GRAPH */
+        .graph-box { 
+            position: absolute; bottom: 20px; right: 20px; width: 500px; height: 180px; 
+            background: var(--glass-bg); border-top: 2px solid var(--border-color); 
+            padding: 10px; pointer-events: auto; 
+        }
+        
+        /* MARKERS */
+        .pulse-g { width: 20px; height: 20px; background: var(--neon-green); border-radius: 50%; box-shadow: 0 0 10px var(--neon-green); }
+        .pulse-r { width: 20px; height: 20px; background: var(--neon-red); border-radius: 50%; box-shadow: 0 0 20px var(--neon-red); animation: flash 0.2s infinite; }
+
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+
+    <div class="hud">
+        <div class="header">
+            <div>
+                <h1>BHARAT-HIVE // 6G</h1>
+                <div id="conn-status" class="demo">INITIALIZING SYSTEM...</div>
+            </div>
+            <button class="theme-btn" onclick="toggleTheme()">☀ MODE</button>
+        </div>
+
+        <div id="console">
+            <div>> SYSTEM BOOT SEQUENCE STARTED...</div>
+        </div>
+
+        <div class="sidebar">
+            <div id="badge" class="badge">SYSTEM NORMAL</div>
+            
+            <div class="metric">
+                <div class="label">ACTIVE NODE ID</div>
+                <div class="val" id="nid">--</div>
+            </div>
+            <div class="metric">
+                <div class="label">TELEMETRY (TEMP/RF)</div>
+                <div class="val" id="temp">00.0</div>
+            </div>
+            <div class="metric" style="border:none;">
+                <div class="label">AI RISK SCORE (Z)</div>
+                <div class="val" id="risk">0.00</div>
+            </div>
+        </div>
+
+        <div class="graph-box">
+            <canvas id="chart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // --- 3. CONFIG & STATE ---
+        let isLightMode = false;
+        const darkTiles = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+        const lightTiles = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'; // Positron (Clean)
+
+        // --- 4. INITIALIZATION ---
+        function log(msg, isErr=false) {
+            const c = document.getElementById('console');
+            c.innerHTML = `<div class="${isErr?'err':''} पाने">> ${new Date().toLocaleTimeString()} ${msg}</div>` + c.innerHTML;
+        }
+
+        // Map Setup
+        const map = L.map('map', {zoomControl: false}).setView([12.9716, 77.5946], 13);
+        const tileLayer = L.tileLayer(darkTiles).addTo(map);
+        const markerIcon = L.divIcon({ html: '<div id="marker" class="pulse-g"></div>', className: 'custom' });
+        L.marker([12.9716, 77.5946], {icon: markerIcon}).addTo(map);
+
+        // Chart Setup
+        const ctx = document.getElementById('chart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: Array(40).fill(''),
+                datasets: [{ 
+                    data: Array(40).fill(0), 
+                    borderColor: '#00ff41', 
+                    borderWidth: 2, 
+                    pointRadius: 0, 
+                    tension: 0.4,
+                    fill: true,
+                    backgroundColor: 'rgba(0, 255, 65, 0.1)'
+                }]
+            },
+            options: { 
+                responsive: true, maintainAspectRatio: false, 
+                plugins: { legend: false }, 
+                scales: { 
+                    y: { display: false }, 
+                    x: { display: false } 
+                }, 
+                animation: { duration: 0 } 
+            }
+        });
+
+        // --- 5. TOGGLE THEME FUNCTION ---
+        function toggleTheme() {
+            isLightMode = !isLightMode;
+            document.body.classList.toggle('light-mode');
+            
+            // Update Text
+            document.querySelector('.theme-btn').innerText = isLightMode ? "☾ MODE" : "☀ MODE";
+            
+            // Update Map Tiles
+            tileLayer.setUrl(isLightMode ? lightTiles : darkTiles);
+            
+            // Trigger visual update to fix chart colors immediately
+            const status = document.getElementById('badge').innerText.includes("CRITICAL") ? "CRITICAL" : "NORMAL";
+            updateVisuals(status);
+        }
+
+        // --- 6. MAIN DATA LOOP (Robust) ---
+        let simStep = 0;
+        let simFault = false;
+        let simCooldown = 0;
+
+        async function loop() {
+            try {
+                // 1. Try Live Fetch
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 400);
+                
+                const res = await fetch('http://127.0.0.1:5000/data', { signal: controller.signal });
+                clearTimeout(timeoutId);
+                
+                if (!res.ok) throw new Error("Bridge Error");
+                const data = await res.json();
+
+                if (data.status && data.status.includes("OFFLINE")) {
+                    updateUI(data, false, "⚠️ BRIDGE CONNECTED | HARDWARE OFFLINE");
+                } else {
+                    updateUI(data, true, "🟢 LIVE UPLINK ESTABLISHED");
+                }
+
+            } catch (e) {
+                // 2. Simulation Fallback
+                simStep += 0.1;
+                if (simCooldown > 0) simCooldown--;
+                if (Math.random() > 0.99 && simCooldown === 0) { 
+                    simFault = !simFault; 
+                    simCooldown = 50; 
+                    log("SIMULATION: INJECTING FAULT...", true);
+                }
+
+                let risk = simFault ? 5.0 + Math.random()*2 : 0.1 + Math.random()*0.2;
+                let temp = simFault ? 95.0 + Math.random()*5 : 45.0 + Math.sin(simStep)*5;
+                
+                updateUI({ 
+                    id: 1, temp: temp, risk: risk, 
+                    status: simFault ? "CRITICAL" : "NORMAL" 
+                }, false, "⚠️ DEMO MODE (BACKEND UNREACHABLE)");
+            }
+        }
+
+        // --- 7. UI UPDATE LOGIC ---
+        function updateUI(data, isLive, statusMsg) {
+            const conn = document.getElementById('conn-status');
+            conn.innerText = statusMsg;
+            
+            // Adjust connection text color based on mode
+            if (isLive) {
+                conn.className = "live"; 
+                conn.style.color = isLightMode ? "#009933" : "#00ff41";
+            } else {
+                conn.className = "demo";
+                conn.style.color = "orange";
+            }
+
+            document.getElementById('nid').innerText = "0" + data.id;
+            document.getElementById('temp').innerText = data.temp.toFixed(1);
+            document.getElementById('risk').innerText = data.risk.toFixed(2);
+
+            updateVisuals(data.status);
+
+            // Log real alerts
+            if(data.status === "CRITICAL" && isLive && Math.random() > 0.8) {
+                log(`ALERT: NODE-0${data.id} HIGH RISK (${data.risk.toFixed(1)})`, true);
+            }
+
+            // Push Graph
+            const arr = chart.data.datasets[0].data;
+            arr.shift();
+            arr.push(data.risk);
+            chart.update();
+        }
+
+        function updateVisuals(status) {
+            const badge = document.getElementById('badge');
+            const marker = document.getElementById('marker');
+            
+            // Dynamic Colors based on Theme
+            const green = isLightMode ? '#009933' : '#00ff41';
+            const red = isLightMode ? '#cc0000' : '#ff003c';
+
+            if (status === "CRITICAL") {
+                badge.innerText = "CRITICAL FAULT";
+                badge.className = "badge crit";
+                marker.className = "pulse-r";
+                // Force colors
+                badge.style.color = red;
+                badge.style.borderColor = red;
+                marker.style.background = red;
+                chart.data.datasets[0].borderColor = red;
+                chart.data.datasets[0].backgroundColor = 'rgba(255, 0, 60, 0.2)';
+            } else {
+                badge.innerText = "SYSTEM NORMAL";
+                badge.className = "badge";
+                marker.className = "pulse-g";
+                // Force colors
+                badge.style.color = green;
+                badge.style.borderColor = green;
+                marker.style.background = green;
+                chart.data.datasets[0].borderColor = green;
+                chart.data.datasets[0].backgroundColor = isLightMode ? 'rgba(0, 153, 51, 0.1)' : 'rgba(0, 255, 65, 0.1)';
+            }
+        }
+
+        setInterval(loop, 150);
+
+    </script>
+</body>
+</html>

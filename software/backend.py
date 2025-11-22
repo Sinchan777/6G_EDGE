@@ -5,98 +5,124 @@ import threading
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-# ==========================================
-# ⚙️ CONFIGURATION
-# ==========================================
-# CHANGE THIS TO MATCH YOUR BHARATPI PORT
-# Windows Example: 'COM3'
-# Linux/Mac Example: '/dev/ttyUSB0'
-SERIAL_PORT = '/dev/ttyUSB0'  
+# --- CONFIG ---
+SERIAL_PORT = 'COM3' # <--- CHECK THIS AGAIN
 BAUD_RATE = 115200
-# ==========================================
+# --------------
 
 app = Flask(__name__)
-CORS(app) # Enable Cross-Origin Resource Sharing for the HTML frontend
+CORS(app)
 
-# Global State with Timestamp to track freshness
-current_state = {
-    "id": 0,
-    "temp": 0.0,
-    "risk": 0.0,
-    "status": "WAITING",
-    "last_update": 0  # <--- NEW: Tracks when the last valid packet arrived
-}
+current_state = {"id": 0, "temp": 0.0, "risk": 0.0, "status": "WAITING", "last_update": 0}
 
 def read_serial_loop():
-    """
-    Background thread: Reads USB Serial data.
-    Updates 'current_state' ONLY when valid data arrives.
-    """
     global current_state
-    
     while True:
         try:
-            print(f"🔌 Connecting to {SERIAL_PORT}...")
             ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-            print("✅ Connected! Listening for Telemetry...")
+            print(f"✅ Connected to {SERIAL_PORT}")
             
             while True:
-                if ser.in_waiting > 0:
-                    # Read line from BharatPi
-                    # Expected Format: "ID:1,Telemetry:45.5,RiskScore:0.1"
-                    line = ser.readline().decode('utf-8', errors='ignore').strip()
+                if ser.in_waiting:
+                    # READ RAW LINE
+                    raw_line = ser.readline().decode('utf-8', errors='ignore').strip()
                     
-                    # Robust Regex Parsing
-                    id_match = re.search(r'ID:(\d+)', line)
-                    temp_match = re.search(r'Telemetry:([\d\.]+)', line)
-                    risk_match = re.search(r'RiskScore:([\d\.]+)', line)
+                    # PRINT IT (DEBUGGING)
+                    if "RiskScore" in raw_line:
+                        print(f"RAW DATA: {raw_line}") # <--- WATCH THIS IN TERMINAL
+                    
+                    # PARSE IT
+                    id_match = re.search(r'ID:(\d+)', raw_line)
+                    temp_match = re.search(r'Telemetry:([\d\.]+)', raw_line)
+                    risk_match = re.search(r'RiskScore:([\d\.]+)', raw_line)
                     
                     if temp_match and risk_match:
-                        # Extract values
                         t = float(temp_match.group(1))
                         r = float(risk_match.group(1))
-                        node_id = int(id_match.group(1)) if id_match else 0
+                        node_id = int(id_match.group(1)) if id_match else 1
                         
-                        # Determine Status Logic locally as a fallback
                         status = "NORMAL"
                         if r > 4.0: status = "CRITICAL"
                         
-                        # Update the Global State with current time
                         current_state = {
-                            "id": node_id,
-                            "temp": t,
-                            "risk": r,
-                            "status": status,
-                            "last_update": time.time() # <--- TIMESTAMP UPDATE
+                            "id": node_id, "temp": t, "risk": r, "status": status, "last_update": time.time()
                         }
-                        print(f"📥 Received: {current_state}")
                         
+                        # PRINT SUCCESS
+                        if status == "CRITICAL":
+                            print(">>> CRITICAL UPDATE DETECTED! <<<")
+
         except Exception as e:
-            print(f"⚠️ Serial Error: {e}")
-            print("🔄 Retrying in 2 seconds...")
+            print(f"Serial Error: {e}")
             time.sleep(2)
 
-# Start the Serial Reader Thread
 threading.Thread(target=read_serial_loop, daemon=True).start()
 
 @app.route('/data')
 def get_data():
-    """
-    API Endpoint: Returns JSON data to the dashboard.
-    Includes a 'Freshness Check' to detect disconnections.
-    """
-    # 1. Check if data is stale (older than 3 seconds)
+    # If no data for 3 seconds, go OFFLINE
     if time.time() - current_state['last_update'] > 3:
-        return jsonify({
-            "id": 0, 
-            "temp": 0, 
-            "risk": 0, 
-            "status": "OFFLINE/DISCONNECTED" # <--- FORCE OFFLINE STATUS
-        })
-    
-    # 2. If fresh, return actual data
+        return jsonify({"id": 0, "temp": 0, "risk": 0, "status": "OFFLINE"})
     return jsonify(current_state)
 
 if __name__ == '__main__':
-    print("🚀 Bridge Server Running on http://localhost:5000")
     app.run(host='0.0.0.0', port=5000)
+```
+
+**Run this.**
+1.  Press the button on the Twin.
+2.  Look at the Python Terminal.
+3.  **If you see:** `RAW DATA: ID:1,Telemetry:150.0,RiskScore:12.5`
+    * But the Dashboard is still green...
+    * **Then the issue is the Browser Cache.** Refresh the page `Ctrl+F5`.
+
+---
+
+### **Step 3: The "Nuclear" Fix (Sync the Code)**
+If Step 1 showed "Scenario A" (Queen not hearing Twin), here is the most common mistake:
+
+**The ESP-NOW Channel Mismatch.**
+If your home WiFi is on Channel 1, and ESP-NOW tries Channel 1, but your Laptop forces the BharatPi to Channel 6... the packets get lost.
+
+**Fix:** Update the **Twin Code** to cycle through channels until it finds the Queen. Or, simpler for the hackathon:
+
+**Update the Twin `setup()` code to this:**
+
+```cpp
+// Inside esp32_twin_sender.ino
+
+void setup() {
+  // ... (Init lines) ...
+  
+  WiFi.mode(WIFI_STA);
+  
+  // FORCE CHANNEL 1 (Add this line)
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+
+  if (esp_now_init() != ESP_OK) { return; }
+  
+  // ... (Rest of code) ...
+}
+```
+
+**And Update the Queen `setup()` code to this:**
+
+```cpp
+// Inside bharatpi_queen.ino
+
+void setup() {
+  // ... (Init lines) ...
+
+  WiFi.mode(WIFI_STA);
+
+  // FORCE CHANNEL 1 (Add this line)
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+
+  if (esp_now_init() != ESP_OK) { return; }
+
+  // ... (Rest of code) ...
+}

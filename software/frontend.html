@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>6G HIVE OPS | COMMAND CENTER</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <style>
+        :root {
+            --neon-green: #00ff41;
+            --neon-red: #ff003c;
+            --bg-dark: #050505;
+            --glass: rgba(10, 10, 10, 0.9);
+        }
+        body { margin: 0; background: var(--bg-dark); color: white; font-family: 'Courier New', monospace; overflow: hidden; }
+
+        /* CRT SCANLINE EFFECT */
+        body::after {
+            content: " "; display: block; position: absolute; top: 0; left: 0; bottom: 0; right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            z-index: 100; background-size: 100% 2px, 3px 100%; pointer-events: none;
+        }
+
+        #map { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 0; filter: grayscale(100%) contrast(1.3) brightness(0.5); }
+        .hud-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; display: flex; flex-direction: column; justify-content: space-between; }
+
+        /* HEADER */
+        .header { background: linear-gradient(90deg, var(--glass) 0%, transparent 100%); padding: 20px; border-left: 5px solid var(--neon-green); pointer-events: auto; width: 400px; margin: 20px; }
+        h1 { margin: 0; font-size: 28px; text-shadow: 0 0 10px var(--neon-green); }
+        
+        /* TERMINAL LOG WINDOW (NEW) */
+        .terminal-window {
+            position: absolute; bottom: 20px; left: 20px; width: 400px; height: 200px;
+            background: black; border: 1px solid #333; font-size: 12px; color: #0f0;
+            padding: 10px; overflow-y: hidden; display: flex; flex-direction: column-reverse;
+            pointer-events: auto; opacity: 0.9;
+            box-shadow: 0 0 15px rgba(0, 255, 65, 0.2);
+        }
+        .log-entry { margin: 2px 0; border-bottom: 1px solid #111; }
+        .log-crit { color: var(--neon-red); font-weight: bold; }
+
+        /* SIDEBAR */
+        .sidebar { width: 300px; background: var(--glass); margin: 20px; padding: 20px; border-radius: 4px; pointer-events: auto; position: absolute; right: 20px; top: 20px; }
+        .metric-val { font-size: 42px; font-weight: bold; }
+        
+        .status-badge { padding: 15px; text-align: center; font-size: 20px; font-weight: bold; border: 2px solid var(--neon-green); color: var(--neon-green); margin-bottom: 20px; }
+        .critical { border-color: var(--neon-red); color: var(--neon-red); animation: flash 0.5s infinite; }
+        @keyframes flash { 0% { opacity: 1; } 50% { opacity: 0.5; } }
+
+        /* PULSE MARKERS */
+        .pulse-green { width: 20px; height: 20px; background: var(--neon-green); border-radius: 50%; box-shadow: 0 0 0 0 rgba(0, 255, 65, 0.7); animation: pg 2s infinite; }
+        .pulse-red { width: 20px; height: 20px; background: var(--neon-red); border-radius: 50%; box-shadow: 0 0 0 0 rgba(255, 0, 60, 0.7); animation: pr 0.8s infinite; }
+        @keyframes pg { 70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(0, 255, 65, 0); } }
+        @keyframes pr { 70% { transform: scale(1); box-shadow: 0 0 0 20px rgba(255, 0, 60, 0); } }
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+
+    <div class="hud-container">
+        <div class="header">
+            <h1>HIVE OPS // 6G</h1>
+            <div style="font-size: 12px; color: #aaa; font-weight: bold;" id="conn-status">INITIALIZING UPLINK...</div>
+        </div>
+
+        <!-- LIVE HACKER TERMINAL -->
+        <div class="terminal-window" id="terminal">
+            <div class="log-entry">> SYSTEM BOOT SEQUENCE INITIATED...</div>
+            <div class="log-entry">> CONNECTING TO MESH NETWORK...</div>
+        </div>
+
+        <div class="sidebar">
+            <div id="status-box" class="status-badge">SYSTEM NORMAL</div>
+            <div style="font-size: 11px; color: #888;">AI RISK SCORE (Z)</div>
+            <div class="metric-val" id="val-risk">0.00</div>
+            <br>
+            <div style="font-size: 11px; color: #888;">TELEMETRY</div>
+            <div class="metric-val" id="val-temp">00.0</div>
+            <br>
+            <div style="height: 100px;">
+                <canvas id="riskChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // AUDIO BEEP (Base64 to avoid file dependencies)
+        const beep = new Audio("data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU"); // Placeholder, browser prevents auto-play usually
+        
+        // Use Web Audio API for a generated beep (More reliable)
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playAlarm() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.type = 'square';
+            oscillator.frequency.setValueAtTime(800, audioCtx.currentTime); // 800Hz beep
+            oscillator.frequency.exponentialRampToValueAtTime(200, audioCtx.currentTime + 0.1);
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + 0.1);
+        }
+
+        // MAP
+        const map = L.map('map', {zoomControl: false}).setView([12.9716, 77.5946], 13);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png').addTo(map);
+        const towerIcon = L.divIcon({ html: '<div id="map-marker" class="pulse-green"></div>', className: 'custom-icon' });
+        L.marker([12.9716, 77.5946], {icon: towerIcon}).addTo(map);
+
+        // CHART
+        const ctx = document.getElementById('riskChart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: Array(30).fill(''),
+                datasets: [{ data: Array(30).fill(0), borderColor: '#0f0', borderWidth: 2, pointRadius: 0, tension: 0.4 }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { display: false }, x: { display: false } }, animation: { duration: 0 } }
+        });
+
+        // TERMINAL LOG
+        function addLog(msg, isCrit) {
+            const term = document.getElementById('terminal');
+            const div = document.createElement('div');
+            div.className = isCrit ? 'log-entry log-crit' : 'log-entry';
+            const time = new Date().toLocaleTimeString('en-GB');
+            div.innerText = `> [${time}] ${msg}`;
+            term.prepend(div); // Add to top
+            if(term.childElementCount > 12) term.lastElementChild.remove();
+        }
+
+        let simStep = 0; let simFault = false; let simCooldown = 0;
+
+        async function loop() {
+            try {
+                const controller = new AbortController();
+                setTimeout(() => controller.abort(), 400);
+                const res = await fetch('http://localhost:5000/data', { signal: controller.signal });
+                if(!res.ok) throw new Error();
+                const data = await res.json();
+                updateUI(data, true);
+            } catch (e) {
+                // SIMULATION FALLBACK
+                document.getElementById('conn-status').innerText = "⚠️ DEMO MODE: SIMULATION ACTIVE";
+                document.getElementById('conn-status').style.color = "orange";
+                
+                simStep += 0.1;
+                if(simCooldown > 0) simCooldown--;
+                if(Math.random() > 0.98 && simCooldown === 0) { simFault = !simFault; simCooldown = 30; }
+                
+                let risk = simFault ? 5 + Math.random() : 0.2 + Math.random()*0.3;
+                let status = simFault ? "CRITICAL" : "NORMAL";
+                
+                updateUI({ id: simFault?1:2, temp: simFault?95:45, risk: risk, status: status }, false);
+            }
+        }
+
+        function updateUI(data, isLive) {
+            if(isLive) {
+                document.getElementById('conn-status').innerText = "🟢 LIVE UPLINK ESTABLISHED";
+                document.getElementById('conn-status').style.color = "#0f0";
+            }
+
+            document.getElementById('val-risk').innerText = data.risk.toFixed(2);
+            document.getElementById('val-temp').innerText = data.temp.toFixed(1);
+            
+            const box = document.getElementById('status-box');
+            const marker = document.getElementById('map-marker');
+
+            if (data.status === "CRITICAL") {
+                box.innerText = "CRITICAL FAULT"; box.className = "status-badge critical";
+                marker.className = "pulse-red";
+                chart.data.datasets[0].borderColor = '#ff003c';
+                addLog(`ALERT: NODE-0${data.id} RISK SPIKE (${data.risk.toFixed(1)})`, true);
+                playAlarm(); // BEEP!
+            } else {
+                box.innerText = "SYSTEM NORMAL"; box.className = "status-badge";
+                marker.className = "pulse-green";
+                chart.data.datasets[0].borderColor = '#00ff41';
+                // Only log normal data occasionally to avoid spam
+                if(Math.random() > 0.8) addLog(`RX: NODE-0${data.id} | TELEMETRY OK`, false);
+            }
+
+            const arr = chart.data.datasets[0].data; arr.shift(); arr.push(data.risk); chart.update();
+        }
+        setInterval(loop, 200);
+    </script>
+</body>
+</html>
